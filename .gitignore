@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.idea/
+
+# Env / secrets
+.env
+
+# DB (якщо sqlite)
+*.sqlite
+*.db
+
+# Logs
+*.log
