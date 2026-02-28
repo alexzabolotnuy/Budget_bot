@@ -39,6 +39,10 @@ def categories_kb(categories) -> InlineKeyboardMarkup:
     rows = []
     for c in categories:
         rows.append([InlineKeyboardButton(text=f"{c['emoji']} {c['name']}", callback_data=f"cat:{c['id']}")])
+
+    # ✅ Додаємо кнопку "Додати категорію" внизу списку
+    rows.append([InlineKeyboardButton(text="➕ Додати категорію", callback_data="cat:add")])
+
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -63,18 +67,12 @@ def _parse_ddmmyyyy(s: str) -> str | None:
 
 
 async def _finish_flow(message: Message, state: FSMContext):
-    """
-    Завершення флоу:
-    - якщо додавання було з "Чи закриваємо день?" -> знов питаємо "Чи закриваємо день?"
-    - інакше -> показуємо меню
-    """
     data = await state.get_data()
     from_close_day = bool(data.get("from_close_day"))
 
     await state.clear()
 
     if from_close_day:
-        # локально, щоб уникати циклічних імпортів
         from handlers.day_close import close_day_kb
         await message.answer("Чи закриваємо день?", reply_markup=close_day_kb())
     else:
@@ -82,10 +80,6 @@ async def _finish_flow(message: Message, state: FSMContext):
 
 
 async def start_add_expense_flow(message: Message, state: FSMContext, from_close_day: bool = False):
-    """
-    Єдиний старт флоу додавання витрати.
-    Перший крок: вибір дати.
-    """
     await state.clear()
     await state.update_data(from_close_day=from_close_day)
     await state.set_state(AddExpense.date_choice)
@@ -144,6 +138,27 @@ async def add_expense_amount(message: Message, state: FSMContext, repo: Repo):
 
     cats = await repo.list_categories()
     await message.answer("Куди віднести витрату?", reply_markup=categories_kb(cats))
+
+
+@router.callback_query(AddExpense.category, F.data == "cat:add")
+async def add_category_from_expense(cb: CallbackQuery, state: FSMContext):
+    """
+    Кнопка "➕ Додати категорію" у списку категорій.
+    Перевикористовуємо існуючий flow додавання категорії (як ти просив).
+    """
+    await cb.answer()
+
+    # Спробуємо викликати існуючий флоу додавання категорії.
+    # IMPORTANT: локальний import, щоб не було циклів/падінь якщо модуль названий інакше.
+    try:
+        # Очікуємо, що у тебе вже є функція start_add_category_flow(message, state, return_to=...)
+        from handlers.categories import start_add_category_flow  # <-- якщо у тебе файл/назва інша — скажеш, я підправлю
+        await start_add_category_flow(cb.message, state, return_to="expense_category")
+        return
+    except Exception:
+        # Якщо не знайшли/інший інтерфейс — не валимо бота
+        await cb.message.answer("Не знайшов флоу додавання категорії. Скажи, в якому файлі/функції він у тебе реалізований.")
+        return
 
 
 @router.callback_query(AddExpense.category, F.data.startswith("cat:"))

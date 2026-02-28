@@ -7,6 +7,7 @@ from aiogram import Router, F
 from aiogram.types import Message
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.storage.base import StorageKey
 
 from repo import Repo
 from services.formatting import parse_amount_to_cents, money
@@ -43,17 +44,14 @@ async def send_home(message: Message, repo: Repo, tz_name: str):
     year, month = await _ensure_bootstrap(repo, tz_name)
 
     budget = await repo.get_monthly_budget(year, month)
-
     if budget <= 0:
         await message.answer("Введи місячний бюджет:", reply_markup=main_kb())
         return
 
-    # month bounds for totals
     mctx = month_bounds(now, tz)
     spent = await repo.sum_month_total(mctx.start_date, mctx.end_date)
     remaining = budget - spent
 
-    # Місяць (людська назва)
     month_name = now.strftime("%B")
 
     await message.answer(
@@ -79,6 +77,15 @@ async def start_cmd(message: Message, state: FSMContext, repo: Repo, tz_name: st
     await send_home(message, repo, tz_name)
 
 
+@router.message(F.text == "💰 Змінити бюджет")
+async def change_budget_start(message: Message, state: FSMContext, repo: Repo, tz_name: str):
+    # просто переводимо в той самий state, що й первинна установка
+    await state.clear()
+    await _ensure_bootstrap(repo, tz_name)
+    await state.set_state(SetMonthlyBudget.amount)
+    await message.answer("Введи місячний бюджет:", reply_markup=main_kb())
+
+
 @router.message(SetMonthlyBudget.amount)
 async def set_budget_amount(message: Message, state: FSMContext, repo: Repo, tz_name: str):
     cents = parse_amount_to_cents(message.text or "")
@@ -88,12 +95,16 @@ async def set_budget_amount(message: Message, state: FSMContext, repo: Repo, tz_
 
     year, month = await _ensure_bootstrap(repo, tz_name)
 
-    # 1) зберігаємо бюджет
+    # 1) зберігаємо бюджет (перезаписуємо)
     await repo.set_monthly_budget(year, month, cents)
 
-    # 2) очищаємо state ВСІМ користувачам
+    # 2) очищаємо state ВСІМ користувачам (aiogram v3 style)
+    from aiogram.fsm.storage.base import StorageKey
+
     for uid in cfg.users:
-        await state.storage.set_state(chat=uid, user=uid, state=None)
+        key = StorageKey(bot_id=message.bot.id, chat_id=uid, user_id=uid)
+        await state.storage.set_state(key, None)
+        await state.storage.set_data(key, {})
 
     # 3) очищаємо локальний state
     await state.clear()

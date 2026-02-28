@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import calendar
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -21,14 +22,13 @@ MONTH_NAMES_UA = {
 
 @router.message(F.text == "📊 Стан бюджету")
 async def budget_status(message: Message, state: FSMContext, repo: Repo, tz_name: str):
-    # глобальна кнопка має перебивати будь-який flow
     await state.clear()
 
     tz = ZoneInfo(tz_name)
     now = datetime.now(tz)
+    today = now.date()
     mctx = month_bounds(now, tz)
 
-    # гарантуємо, що ліміти місяця існують
     await repo.ensure_month_limits_from_category_defaults(mctx.year, mctx.month)
 
     cats = await repo.list_categories()
@@ -51,11 +51,9 @@ async def budget_status(message: Message, state: FSMContext, repo: Repo, tz_name
         emoji = c["emoji"]
         name = c["name"]
 
-        # Назва категорії (рядок 1)
         detail_lines.append(f"{emoji} {name}")
 
         if lim is None:
-            # Без ліміту (як у тебе було)
             detail_lines.append(f"{money(spent)} (без ліміту)")
             detail_lines.append("")
             continue
@@ -66,26 +64,51 @@ async def budget_status(message: Message, state: FSMContext, repo: Repo, tz_name
         if lim > 0 and spent > lim:
             exceeded += 1
 
-        # Рядок 2: spent/limit + BAR + remaining + статус (як на твоєму скріні)
-        # Бар на 5 квадратів
         p = 0.0 if lim <= 0 else (spent / lim)
         bar = bar_squares_5(p)
 
         status = "🔴" if remaining < 0 else "🟢"
-        # показуємо remaining як є (може бути відʼємний)
-        detail_lines.append(
-            f"{money(spent)} / {money(lim)}  {bar}  {money(remaining)} {status}"
-        )
-
+        detail_lines.append(f"{money(spent)} / {money(lim)}  {bar}  {money(remaining)} {status}")
         detail_lines.append("")
 
     await message.answer("\n".join(detail_lines).rstrip())
 
     # ---------- SUMMARY SECOND ----------
-    budget = await repo.get_monthly_budget(mctx.year, mctx.month)
+    monthly_budget = await repo.get_monthly_budget(mctx.year, mctx.month)
     spent_total = await repo.sum_month_total(mctx.start_date, mctx.end_date)
-    remaining_total = budget - spent_total
+    remaining_total = monthly_budget - spent_total
 
+    # ---- Safe-spend на завтра (ВАРІАНТ 3) ----
+    # planned_fixed = сума лімітів fixed категорій (тільки там де є ліміт)
+    planned_fixed_cents = 0
+    spent_variable_cents = 0
+
+    for c in cats:
+        cid = int(c["id"])
+        spent_cat = int(sums.get(cid, 0))
+
+        kind = c["kind"]  # sqlite3.Row -> тільки через ["..."]
+        lim = limits.get(cid, c["limit_cents"])
+
+        if kind == "fixed":
+            if lim is not None:
+                planned_fixed_cents += max(0, int(lim))
+        else:
+            # variable: враховуємо ВСІ variable витрати (і з лімітом, і без)
+            spent_variable_cents += spent_cat
+
+    planned_variable_cents = monthly_budget - planned_fixed_cents
+    if planned_variable_cents < 0:
+        planned_variable_cents = 0
+
+    days_in_month = calendar.monthrange(mctx.year, mctx.month)[1]
+    remaining_days = max(1, days_in_month - today.day)  # дні ПІСЛЯ сьогодні
+
+    safe_spend_tomorrow_cents = int(round((planned_variable_cents - spent_variable_cents) / remaining_days))
+    if safe_spend_tomorrow_cents < 0:
+        safe_spend_tomorrow_cents = 0
+
+    # топ-5 категорій за витратами (місяць)
     top_items = []
     for c in cats:
         cid = int(c["id"])
@@ -99,6 +122,7 @@ async def budget_status(message: Message, state: FSMContext, repo: Repo, tz_name
         f"📊 Summary {month_name}",
         "",
         f"Залишок на місяць: {money(remaining_total)}",
+        f"Safe-spend на завтра: {money(safe_spend_tomorrow_cents)}",
         "",
         "Топ витрати:",
     ]
